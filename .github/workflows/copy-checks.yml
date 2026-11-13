@@ -51,7 +51,9 @@ jobs:
     needs: find
     if: needs.find.outputs.heads != '[]'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # A private repository's runners have half the cores of a public one's, where Ember's own CI takes
+    # about 15 minutes: here the worker's tests alone take about 40.
+    timeout-minutes: 60
     permissions:
       contents: read
     strategy:
