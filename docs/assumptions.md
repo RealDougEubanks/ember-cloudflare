@@ -52,3 +52,14 @@ Decisions made in this private copy of Ember, including where Ember's own guidel
 - Why: Adding routes to the Worker changes upstream code; whether and how is a review decision.
 - Recorded by: Claude (Opus 5.5)
 - Date: 2026-11-11
+
+## Deployments take their updates from this repository, not Ember's
+
+- Assumption: This public repository is where Ember's releases are reviewed; a separate repository
+  deploys, with its Update Ember workflow's `EMBER_REPOSITORY` pointed here. `tag-reviewed.yml` tags
+  main with a release when its update pull request merges, and those tags are all a deployment sees.
+- Why: A deployment then never takes code straight from Ember, and keeps its own `wrangler.jsonc`
+  names, which pushing this repository's main to it would overwrite. Details of a vulnerability go in
+  the deploying repository or a private security advisory, never in this one's pull requests.
+- Recorded by: Claude (Opus 5.5)
+- Date: 2026-11-13

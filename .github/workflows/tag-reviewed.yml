@@ -1,0 +1,36 @@
+name: Tag reviewed releases
+
+# Tags main with Ember's release when its update-ember/vX.Y.Z pull request is merged, so the
+# repositories that deploy Ember can take their updates from this one, whose tags are the releases
+# reviewed and tested here, instead of from Ember's (docs/assumptions.md).
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  tag:
+    if: >-
+      github.event.pull_request.merged &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.event.pull_request.head.ref, 'update-ember/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          MERGED: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          tag=${BRANCH#update-ember/}
+          if ! echo "$tag" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::$BRANCH doesn't name a release."
+            exit 1
+          fi
+          # Tags can't be moved or deleted here, so a release is tagged once, at what was reviewed.
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$MERGED" > /dev/null
+          echo "Tagged $MERGED as $tag" >> "$GITHUB_STEP_SUMMARY"
