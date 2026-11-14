@@ -1,0 +1,117 @@
+name: Copy checks
+
+# This copy's own checks, which Ember's repository doesn't have, so updates never conflict with it.
+# Ember's CI skips copies, and Update Ember opens its pull request with the workflow's own token, which
+# GitHub doesn't let start other workflows: so this runs when Update Ember finishes too, tests every
+# update-ember/* branch, and posts the result as a commit status the pull request shows. A pull
+# request's run posts the same status, so main's protection can require that one name, Copy checks.
+on:
+  pull_request:
+  workflow_run:
+    workflows: [Update Ember]
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  group: copy-checks-${{ github.event.pull_request.number || 'updates' }}
+  cancel-in-progress: true
+
+jobs:
+  # What to test: the pull request's head, or each update branch. Runs none of the branches' code.
+  find:
+    if: >-
+      github.repository != 'NYLLON-SOFTWARE/ember-cloudflare' &&
+      (github.event_name == 'pull_request' || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      statuses: write
+    outputs:
+      heads: ${{ steps.heads.outputs.heads }}
+    steps:
+      - id: heads
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            heads=$(jq -cn --arg sha "$HEAD_SHA" '[$sha]')
+          else
+            heads=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/heads/update-ember/" --jq '[.[].object.sha]')
+          fi
+          echo "heads=$heads" >> "$GITHUB_OUTPUT"
+          # A fork's pull request gets a token that can't post statuses: its checks still run, unreported.
+          for sha in $(echo "$heads" | jq -r '.[]'); do
+            gh api "repos/$GITHUB_REPOSITORY/statuses/$sha" -f state=pending -f context="Copy checks" \
+              -f description="Testing" -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > /dev/null ||
+              echo "::warning::Couldn't post the Copy checks status to $sha"
+          done
+
+  # Runs the branch's code, so its token can only read and isn't kept in the checkout.
+  check:
+    needs: find
+    if: needs.find.outputs.heads != '[]'
+    runs-on: ubuntu-latest
+    # The checks take about 13 minutes on a public repository's runners, and about 40 on a private
+    # one's, which have half the cores.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        head: ${{ fromJSON(needs.find.outputs.heads) }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ matrix.head }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Applied migrations stay as they are
+        # This copy's deployment has applied main's migrations once, by name, so a change to one would
+        # never reach it: an update may only add migrations.
+        run: |
+          base=$(git merge-base origin/main HEAD)
+          changed=$(git diff --name-only --no-renames --diff-filter=DMT "$base" HEAD -- apps/worker/migrations apps/worker/search-migrations)
+          if [ -n "$changed" ]; then
+            echo "::error::These migrations are deployed already, so they can't change: $(echo "$changed" | tr "\n" " ")"
+            exit 1
+          fi
+      - name: No conflict markers are left
+        run: |
+          base=$(git merge-base origin/main HEAD)
+          if git diff -U0 "$base" HEAD | grep -nE '^\+(<<<<<<<|>>>>>>>)( |$)'; then
+            echo "::error::The branch still has conflict markers: resolve them and commit."
+            exit 1
+          fi
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+
+  # One status named the same for every head, unlike the matrix's jobs, which are named for theirs.
+  report:
+    needs: [find, check]
+    if: always() && needs.find.result == 'success' && needs.find.outputs.heads != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          HEADS: ${{ needs.find.outputs.heads }}
+          RESULT: ${{ needs.check.result }}
+        run: |
+          if [ "$RESULT" = success ]; then state=success; description="Typecheck, tests and build pass"; else state=failure; description="Checks failed: see the run"; fi
+          for sha in $(echo "$HEADS" | jq -r '.[]'); do
+            gh api "repos/$GITHUB_REPOSITORY/statuses/$sha" -f state=$state -f context="Copy checks" \
+              -f description="$description" -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > /dev/null
+          done
